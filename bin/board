@@ -1,0 +1,158 @@
+#!/usr/bin/env bash
+# board — ใช้งาน loop-board หลายตัวที่อยู่ใต้ ~/boards (1 บอร์ด = 1 repo)
+#
+# ชื่อโฟลเดอร์บอร์ด = short name ในตาราง Repositories ของ setup.md
+# path ของ repo อ่านจากตารางนั้น ไม่ต้องจำเอง
+set -euo pipefail
+
+BOARDS_DIR="${BOARDS_DIR:-$HOME/boards}"
+LOOP_BOARD_DIR="${LOOP_BOARD_DIR:-$HOME/loop-board}"
+
+usage() {
+  cat <<EOF
+board                สรุปทุกบอร์ด + งานที่รอเรา
+board open <name>    เปิด Claude Code ใน repo ของบอร์ด พร้อม --add-dir บอร์ด (ส่ง flag อื่นต่อท้ายได้)
+board check          ตรวจทุกบอร์ดว่ายังตรงกับ $LOOP_BOARD_DIR และ repo ยังพร้อมรัน loop
+
+บอร์ดอยู่ที่ $BOARDS_DIR (เปลี่ยนได้ด้วย BOARDS_DIR=...)
+EOF
+}
+
+die() { echo "board: $*" >&2; exit 1; }
+
+boards() {
+  local d
+  for d in "$BOARDS_DIR"/*/; do
+    [ -f "$d/setup.md" ] && basename "$d"
+  done
+  return 0
+}
+
+# แถวแรกของตาราง Repositories: | `short` | `path` | `branch` |
+repo_path() {
+  local p
+  p=$(awk '/^## Repositories/{f=1; next} /^## /{f=0} f && /^\| `/' "$BOARDS_DIR/$1/setup.md" \
+    | head -1 | awk -F'`' '{print $4}')
+  [ -n "$p" ] || return 1
+  echo "${p/#\~/$HOME}"
+}
+
+status_of() { sed -n 's/^status:[[:space:]]*//p' "$1" | head -1; }
+
+cmd_list() {
+  local name f s todo active mine done_ repo waiting=""
+  printf '%-14s %5s %7s %8s %5s  %s\n' BOARD TODO ACTIVE WAITING DONE REPO
+  for name in $(boards); do
+    todo=0 active=0 mine=0 done_=0
+    for f in "$BOARDS_DIR/$name"/tasks/*.md; do
+      [ -f "$f" ] || continue
+      s=$(status_of "$f")
+      case "$s" in
+        "To Do") todo=$((todo + 1)) ;;
+        "In Progress" | "Agent Finished" | "Needs Changes" | "Ready to Merge") active=$((active + 1)) ;;
+        "Needs Input" | "Ready to Test" | "Testing")
+          mine=$((mine + 1))
+          waiting="$waiting  [$s] $name/$(basename "$f" .md)"$'\n' ;;
+        "Done") done_=$((done_ + 1)) ;;
+        "Backlog") ;;
+        *) waiting="$waiting  [status ผิด: '$s'] $name/$(basename "$f" .md)"$'\n' ;;
+      esac
+    done
+    repo=$(repo_path "$name" 2>/dev/null || echo "?")
+    printf '%-14s %5s %7s %8s %5s  %s\n' "$name" "$todo" "$active" "$mine" "$done_" "${repo/#$HOME/~}"
+  done
+  if [ -n "$waiting" ]; then
+    echo
+    echo "รอเรา:"
+    printf '%s' "$waiting"
+  fi
+}
+
+cmd_open() {
+  local name="${1:-}"
+  [ -n "$name" ] || die "ระบุชื่อบอร์ด: $(boards | tr '\n' ' ')"
+  shift
+  [ -f "$BOARDS_DIR/$name/setup.md" ] || die "ไม่มีบอร์ด '$name' ใน $BOARDS_DIR"
+  local repo
+  repo=$(repo_path "$name") || die "อ่าน path ของ repo จาก $name/setup.md ไม่ได้"
+  git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || die "$repo ไม่ใช่ git repo"
+  echo "repo:  $repo"
+  echo "board: $BOARDS_DIR/$name"
+  echo "เริ่ม loop ด้วย /loop /babysit-prs (รอบแรกนั่งดูก่อน)"
+  cd "$repo"
+  exec claude --add-dir "$BOARDS_DIR/$name" "$@"
+}
+
+cmd_check() {
+  local name repo src="$LOOP_BOARD_DIR" bad=0
+  [ -d "$src/board" ] || die "ไม่เจอ loop-board ที่ $src"
+  for name in $(boards); do
+    echo "== $name"
+    local b="$BOARDS_DIR/$name"
+    if [ ! -f "$b/protocol.md" ]; then
+      echo "  FAIL ไม่มี protocol.md → cp $src/board/protocol.md $b/"
+      bad=1
+    elif cmp -s "$b/protocol.md" "$src/board/protocol.md"; then
+      echo "  ok   protocol.md ตรงกับ loop-board"
+    else
+      echo "  FAIL protocol.md ต่างจาก loop-board → cp $src/board/protocol.md $b/"
+      bad=1
+    fi
+    if [ ! -f "$b/board.base" ]; then
+      echo "  FAIL ไม่มี board.base → cp $src/board/board.base $b/ แล้วรัน board check อีกรอบ"
+      bad=1
+    elif grep -q "file.inFolder(\"$name/tasks\")" "$b/board.base"; then
+      echo "  ok   board.base กรอง $name/tasks"
+    else
+      echo "  FAIL board.base ไม่ได้กรอง $name/tasks (เปิด $BOARDS_DIR เป็น vault แล้วจะว่าง)"
+      echo "       → sed -i '' 's|file.inFolder(\"tasks\")|file.inFolder(\"$name/tasks\")|' $b/board.base"
+      bad=1
+    fi
+    if ! repo=$(repo_path "$name"); then
+      echo "  FAIL อ่าน path ของ repo จาก setup.md ไม่ได้"
+      bad=1
+      continue
+    fi
+    if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
+      echo "  FAIL $repo ไม่ใช่ git repo"
+      bad=1
+      continue
+    fi
+    echo "  ok   repo $repo"
+    if git -C "$repo" check-ignore -q .claude/worktrees/x 2>/dev/null; then
+      echo "  ok   .claude/worktrees/ อยู่ใน .gitignore"
+    else
+      echo "  FAIL .claude/worktrees/ ยังไม่อยู่ใน .gitignore ของ repo"
+      bad=1
+    fi
+    if git -C "$repo" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null; then
+      echo "  ok   origin/HEAD → $(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD)"
+    else
+      echo "  FAIL ยังไม่มี origin/HEAD (worktree จะแตกจาก branch ผิด) → git -C $repo remote set-head origin -a"
+      bad=1
+    fi
+    local pair rel from
+    for pair in "agents/task-worker.md:agents/task-worker.md" \
+                "skills/babysit-prs/SKILL.md:skills/babysit-prs/SKILL.md"; do
+      from="$src/${pair%%:*}"
+      rel=".claude/${pair##*:}"
+      if [ ! -f "$repo/$rel" ]; then
+        echo "  FAIL ไม่มี $rel ใน repo"
+        bad=1
+      elif cmp -s "$repo/$rel" "$from"; then
+        echo "  ok   $rel ตรงกับ loop-board"
+      else
+        echo "  WARN $rel ต่างจาก loop-board (แก้เองใน repo หรือ loop-board อัปเดตแล้ว?)"
+      fi
+    done
+  done
+  return $bad
+}
+
+case "${1:-ls}" in
+  ls | list) cmd_list ;;
+  open) shift; cmd_open "$@" ;;
+  check) cmd_check ;;
+  -h | --help | help) usage ;;
+  *) usage; exit 1 ;;
+esac
