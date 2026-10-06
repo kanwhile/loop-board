@@ -8,6 +8,14 @@ set -euo pipefail
 BOARDS_DIR="${BOARDS_DIR:-$HOME/boards}"
 LOOP_BOARD_DIR="${LOOP_BOARD_DIR:-$HOME/loop-board}"
 
+# สีเปิดเฉพาะตอนพิมพ์ลง terminal · ปิดได้ด้วย NO_COLOR=1
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-}" != dumb ]; then
+  BOLD=$'\e[1m' DIM=$'\e[2m' RST=$'\e[0m'
+  RED=$'\e[31m' GREEN=$'\e[32m' YELLOW=$'\e[33m' BLUE=$'\e[34m' MAGENTA=$'\e[35m' CYAN=$'\e[36m'
+else
+  BOLD='' DIM='' RST='' RED='' GREEN='' YELLOW='' BLUE='' MAGENTA='' CYAN=''
+fi
+
 usage() {
   cat <<EOF
 board                สรุปทุกบอร์ด + งานที่รอเรา
@@ -37,35 +45,154 @@ repo_path() {
   echo "${p/#\~/$HOME}"
 }
 
-status_of() { sed -n 's/^status:[[:space:]]*//p' "$1" | head -1; }
+# ค่าแรกของ field ใน frontmatter · ตัด quote ที่ครอบค่าออก
+field_of() {
+  local v
+  v=$(sed -n "s/^$2:[[:space:]]*//p" "$1" | head -1)
+  v=${v#\"}
+  v=${v%\"}
+  printf '%s' "$v"
+}
+
+# ตัดท้ายให้เหลือ $2 ตัวอักษร (0 = ไม่ตัด)
+clip() {
+  local s="$1" n="$2"
+  if [ "$n" -gt 1 ] && [ "${#s}" -gt "$n" ]; then s="${s:0:$((n - 1))}…"; fi
+  printf '%s' "$s"
+}
+
+# ตัดหัวแทนท้าย — ใช้กับ path เพราะชื่อ repo อยู่ท้าย
+clip_left() {
+  local s="$1" n="$2"
+  if [ "$n" -gt 1 ] && [ "${#s}" -gt "$n" ]; then s="…${s:$((${#s} - n + 1))}"; fi
+  printf '%s' "$s"
+}
+
+# ความกว้างบนจอ — ไม่นับสระบน/ล่างและวรรณยุกต์ไทยที่ซ้อนบนตัวอื่น
+width() {
+  local s="$1" m
+  for m in ั ิ ี ึ ื ฺ ุ ู ็ ่ ้ ๊ ๋ ์ ํ ๎; do s=${s//$m/}; done
+  echo "${#s}"
+}
+
+# printf ของ bash 3.2 เติมช่องว่างตามจำนวน byte ไม่ใช่ตัวอักษร → ไทยกับ · ทำคอลัมน์เลื่อน จึงเติมเอง
+# pad <กว้าง> <ข้อความ> [r] — ชิดซ้าย หรือชิดขวาถ้าใส่ r
+pad() {
+  local n=$(($1 - $(width "$2")))
+  if [ "$n" -lt 0 ]; then n=0; fi
+  if [ "${3:-}" = r ]; then printf '%*s%s' "$n" '' "$2"; else printf '%s%*s' "$2" "$n" ''; fi
+}
+
+# ตัวเลขชิดขวากว้าง $1 สี $2 · ศูนย์เป็นจุดจาง ๆ ให้ตาไปหยุดที่ช่องที่มีงาน
+num() {
+  if [ "$3" -eq 0 ]; then
+    printf '%s%s%s' "$DIM" "$(pad "$1" '·' r)" "$RST"
+  else
+    printf '%s%s%s' "$2" "$(pad "$1" "$3" r)" "$RST"
+  fi
+}
+
+rule() {
+  local i
+  for ((i = 0; i < $1; i++)); do printf '─'; done
+}
+
+# status_since ("2026-10-06 15:40") → เวลาที่ค้างมา เช่น "3 ชม."
+age() {
+  local t m
+  [ -n "$1" ] || return 0
+  t=$(date -j -f '%Y-%m-%d %H:%M' "$1" +%s 2>/dev/null || date -d "$1" +%s 2>/dev/null) || return 0
+  m=$((($(date +%s) - t) / 60))
+  if [ "$m" -lt 1 ]; then echo "เมื่อกี้"
+  elif [ "$m" -lt 60 ]; then echo "$m นาที"
+  elif [ "$m" -lt 1440 ]; then echo "$((m / 60)) ชม."
+  else echo "$((m / 1440)) วัน"
+  fi
+}
 
 cmd_list() {
-  local name f s todo active mine done_ repo waiting=""
-  printf '%-14s %5s %7s %8s %5s  %s\n' BOARD TODO ACTIVE WAITING DONE REPO
+  local name f s task note todo active mine done_ repo label c a
+  local t_todo=0 t_active=0 t_mine=0 t_done=0 nboards=0 nwait=0
+  local namew=5 taskw=0 cols=0 repow=0 notew=0
+  local US=$'\x1f' waiting=""
+
+  for name in $(boards); do
+    if [ "${#name}" -gt "$namew" ]; then namew=${#name}; fi
+    nboards=$((nboards + 1))
+  done
+  if [ "$nboards" -eq 0 ]; then
+    echo "ยังไม่มีบอร์ดใน $BOARDS_DIR — ตั้งบอร์ดด้วย /set-up-the-board"
+    return 0
+  fi
+
+  # ตัด REPO กับบรรทัดรายละเอียดให้พอดีจอ · ตอน pipe ไม่ตัด
+  if [ -t 1 ]; then
+    cols=$(tput cols 2>/dev/null || echo 80)
+    repow=$((cols - namew - 35))
+    if [ "$repow" -lt 12 ]; then repow=0; fi
+    notew=$((cols - 5))
+  fi
+
+  printf '  %s%-*s  %4s  %6s  %7s  %4s   %s%s\n' "$DIM" "$namew" BOARD TODO ACTIVE WAITING DONE REPO "$RST"
   for name in $(boards); do
     todo=0 active=0 mine=0 done_=0
     for f in "$BOARDS_DIR/$name"/tasks/*.md; do
       [ -f "$f" ] || continue
-      s=$(status_of "$f")
+      s=$(field_of "$f" status)
       case "$s" in
-        "To Do") todo=$((todo + 1)) ;;
-        "In Progress" | "Agent Finished" | "Needs Changes" | "Ready to Merge") active=$((active + 1)) ;;
-        "Needs Input" | "Ready to Test" | "Testing")
-          mine=$((mine + 1))
-          waiting="$waiting  [$s] $name/$(basename "$f" .md)"$'\n' ;;
-        "Done") done_=$((done_ + 1)) ;;
-        "Backlog") ;;
-        *) waiting="$waiting  [status ผิด: '$s'] $name/$(basename "$f" .md)"$'\n' ;;
+        "To Do") todo=$((todo + 1)); continue ;;
+        "In Progress" | "Agent Finished" | "Needs Changes" | "Ready to Merge") active=$((active + 1)); continue ;;
+        "Done") done_=$((done_ + 1)); continue ;;
+        "Backlog") continue ;;
+        "Needs Input") mine=$((mine + 1)); note=$(field_of "$f" question) ;;
+        "Ready to Test" | "Testing") mine=$((mine + 1)); note=$(field_of "$f" pr) ;;
+        *) note="" ;;
       esac
+      task=$(basename "$f" .md)
+      if [ "$(width "$task")" -gt "$taskw" ]; then taskw=$(width "$task"); fi
+      nwait=$((nwait + 1))
+      waiting="$waiting$s$US$name$US$task$US$(field_of "$f" status_since)$US$note"$'\n'
     done
+    t_todo=$((t_todo + todo)) t_active=$((t_active + active)) t_mine=$((t_mine + mine)) t_done=$((t_done + done_))
     repo=$(repo_path "$name" 2>/dev/null || echo "?")
-    printf '%-14s %5s %7s %8s %5s  %s\n' "$name" "$todo" "$active" "$mine" "$done_" "${repo/#$HOME/~}"
+    printf '  %s%-*s%s' "$BOLD" "$namew" "$name" "$RST"
+    printf '  '; num 4 "$BLUE" "$todo"
+    printf '  '; num 6 "$CYAN" "$active"
+    printf '  '; num 7 "$BOLD$YELLOW" "$mine"
+    printf '  '; num 4 "$GREEN" "$done_"
+    printf '   %s%s%s\n' "$DIM" "$(clip_left "${repo/#$HOME/~}" "$repow")" "$RST"
   done
-  if [ -n "$waiting" ]; then
-    echo
-    echo "รอเรา:"
-    printf '%s' "$waiting"
+
+  if [ "$nboards" -gt 1 ]; then
+    printf '  %s%s%s\n' "$DIM" "$(rule $((namew + 29)))" "$RST"
+    printf '  %s%s%s' "$DIM" "$(pad "$namew" "รวม")" "$RST"
+    printf '  '; num 4 "$BOLD" "$t_todo"
+    printf '  '; num 6 "$BOLD" "$t_active"
+    printf '  '; num 7 "$BOLD" "$t_mine"
+    printf '  '; num 4 "$BOLD" "$t_done"
+    printf '\n'
   fi
+
+  echo
+  if [ "$nwait" -eq 0 ]; then
+    printf '  %s✓%s ไม่มีงานรอเรา\n' "$GREEN" "$RST"
+    return 0
+  fi
+  printf '  %sรอเรา%s %s%d งาน%s\n' "$BOLD$YELLOW" "$RST" "$DIM" "$nwait" "$RST"
+  # บรรทัดรอง: Needs Input โชว์คำถาม · Ready to Test/Testing โชว์ลิงก์ PR
+  printf '%s' "$waiting" | while IFS=$US read -r s name task a note; do
+    label=$s
+    case "$s" in
+      "Needs Input") c=$MAGENTA ;;
+      "Ready to Test") c=$YELLOW ;;
+      "Testing") c=$CYAN ;;
+      *) c=$RED label="'$s'" note="status ไม่ตรงกับ protocol.md — งานนี้หายจากทุก view และ loop มองไม่เห็น" ;;
+    esac
+    a=$(age "$a")
+    printf '  %s●%s %s%s%s  %s  %s  %s%s%s\n' "$c" "$RST" "$c" "$(pad 13 "$(clip "$label" 13)")" "$RST" \
+      "$(pad "$namew" "$name")" "$(pad "$taskw" "$task")" "$DIM" "$a" "$RST"
+    if [ -n "$note" ]; then printf '    %s%s%s\n' "$DIM" "$(clip "$note" "$notew")" "$RST"; fi
+  done
 }
 
 cmd_open() {
@@ -76,59 +203,65 @@ cmd_open() {
   local repo
   repo=$(repo_path "$name") || die "อ่าน path ของ repo จาก $name/setup.md ไม่ได้"
   git -C "$repo" rev-parse --git-dir >/dev/null 2>&1 || die "$repo ไม่ใช่ git repo"
-  echo "repo:  $repo"
-  echo "board: $BOARDS_DIR/$name"
-  echo "เริ่ม loop ด้วย /loop /babysit-prs (รอบแรกนั่งดูก่อน)"
+  printf '%srepo %s  %s\n' "$DIM" "$RST" "${repo/#$HOME/~}"
+  printf '%sboard%s  %s\n' "$DIM" "$RST" "${BOARDS_DIR/#$HOME/~}/$name"
+  printf '%s→%s เริ่ม loop ด้วย %s/loop /babysit-prs%s %s(รอบแรกนั่งดูก่อน)%s\n' "$CYAN" "$RST" "$BOLD" "$RST" "$DIM" "$RST"
   cd "$repo"
   exec claude --add-dir "$BOARDS_DIR/$name" "$@"
 }
 
+ok()   { printf '  %sok%s   %s\n' "$GREEN" "$RST" "$*"; }
+fail() { printf '  %sFAIL%s %s\n' "$RED" "$RST" "$*"; }
+warn() { printf '  %sWARN%s %s\n' "$YELLOW" "$RST" "$*"; }
+
 cmd_check() {
-  local name repo src="$LOOP_BOARD_DIR" bad=0
+  local name repo src="$LOOP_BOARD_DIR" bad=0 first=1
   [ -d "$src/board" ] || die "ไม่เจอ loop-board ที่ $src"
   for name in $(boards); do
-    echo "== $name"
+    if [ "$first" -eq 0 ]; then echo; fi
+    first=0
+    printf '%s%s%s\n' "$BOLD" "$name" "$RST"
     local b="$BOARDS_DIR/$name"
     if [ ! -f "$b/protocol.md" ]; then
-      echo "  FAIL ไม่มี protocol.md → cp $src/board/protocol.md $b/"
+      fail "ไม่มี protocol.md → cp $src/board/protocol.md $b/"
       bad=1
     elif cmp -s "$b/protocol.md" "$src/board/protocol.md"; then
-      echo "  ok   protocol.md ตรงกับ loop-board"
+      ok "protocol.md ตรงกับ loop-board"
     else
-      echo "  FAIL protocol.md ต่างจาก loop-board → cp $src/board/protocol.md $b/"
+      fail "protocol.md ต่างจาก loop-board → cp $src/board/protocol.md $b/"
       bad=1
     fi
     if [ ! -f "$b/board.base" ]; then
-      echo "  FAIL ไม่มี board.base → cp $src/board/board.base $b/ แล้วรัน board check อีกรอบ"
+      fail "ไม่มี board.base → cp $src/board/board.base $b/ แล้วรัน board check อีกรอบ"
       bad=1
     elif grep -q "file.inFolder(\"$name/tasks\")" "$b/board.base"; then
-      echo "  ok   board.base กรอง $name/tasks"
+      ok "board.base กรอง $name/tasks"
     else
-      echo "  FAIL board.base ไม่ได้กรอง $name/tasks (เปิด $BOARDS_DIR เป็น vault แล้วจะว่าง)"
-      echo "       → sed -i '' 's|file.inFolder(\"tasks\")|file.inFolder(\"$name/tasks\")|' $b/board.base"
+      fail "board.base ไม่ได้กรอง $name/tasks (เปิด $BOARDS_DIR เป็น vault แล้วจะว่าง)"
+      printf '       %s\n' "→ sed -i '' 's|file.inFolder(\"tasks\")|file.inFolder(\"$name/tasks\")|' $b/board.base"
       bad=1
     fi
     if ! repo=$(repo_path "$name"); then
-      echo "  FAIL อ่าน path ของ repo จาก setup.md ไม่ได้"
+      fail "อ่าน path ของ repo จาก setup.md ไม่ได้"
       bad=1
       continue
     fi
     if ! git -C "$repo" rev-parse --git-dir >/dev/null 2>&1; then
-      echo "  FAIL $repo ไม่ใช่ git repo"
+      fail "$repo ไม่ใช่ git repo"
       bad=1
       continue
     fi
-    echo "  ok   repo $repo"
+    ok "repo $repo"
     if git -C "$repo" check-ignore -q .claude/worktrees/x 2>/dev/null; then
-      echo "  ok   .claude/worktrees/ อยู่ใน .gitignore"
+      ok ".claude/worktrees/ อยู่ใน .gitignore"
     else
-      echo "  FAIL .claude/worktrees/ ยังไม่อยู่ใน .gitignore ของ repo"
+      fail ".claude/worktrees/ ยังไม่อยู่ใน .gitignore ของ repo"
       bad=1
     fi
     if git -C "$repo" symbolic-ref -q refs/remotes/origin/HEAD >/dev/null; then
-      echo "  ok   origin/HEAD → $(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD)"
+      ok "origin/HEAD → $(git -C "$repo" symbolic-ref --short refs/remotes/origin/HEAD)"
     else
-      echo "  FAIL ยังไม่มี origin/HEAD (worktree จะแตกจาก branch ผิด) → git -C $repo remote set-head origin -a"
+      fail "ยังไม่มี origin/HEAD (worktree จะแตกจาก branch ผิด) → git -C $repo remote set-head origin -a"
       bad=1
     fi
     local pair rel from
@@ -137,15 +270,21 @@ cmd_check() {
       from="$src/${pair%%:*}"
       rel=".claude/${pair##*:}"
       if [ ! -f "$repo/$rel" ]; then
-        echo "  FAIL ไม่มี $rel ใน repo"
+        fail "ไม่มี $rel ใน repo"
         bad=1
       elif cmp -s "$repo/$rel" "$from"; then
-        echo "  ok   $rel ตรงกับ loop-board"
+        ok "$rel ตรงกับ loop-board"
       else
-        echo "  WARN $rel ต่างจาก loop-board (แก้เองใน repo หรือ loop-board อัปเดตแล้ว?)"
+        warn "$rel ต่างจาก loop-board (แก้เองใน repo หรือ loop-board อัปเดตแล้ว?)"
       fi
     done
   done
+  echo
+  if [ "$bad" -eq 0 ]; then
+    printf '%s✓ ทุกบอร์ดพร้อมรัน loop%s\n' "$GREEN" "$RST"
+  else
+    printf '%s✗ มีข้อ FAIL — แก้ตามคำสั่งหลัง →%s\n' "$RED" "$RST"
+  fi
   return $bad
 }
 
