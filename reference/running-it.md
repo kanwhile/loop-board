@@ -97,6 +97,15 @@ survives `/bg` is worth checking for yourself; if it doesn't, run the session in
 also has no message history, so anything sent while the session is down is gone. The board doesn't have
 that problem, which is why the board is the source of truth.
 
+### Several boards, one bot
+
+A channel lives inside one session, so it covers one board and goes quiet whenever that session is
+down. `telegram/` is a standalone bot for running several boards under `~/boards` instead. It
+watches every board's frontmatter, pushes `Ready to Test` and `Needs Input`, sets `Testing`,
+`Ready to Merge`, and `Needs Changes` (with its `Changes requested:` block) from buttons, writes
+`answer` from a reply, and then restarts the board's loop in herdr if it had stopped. Setup is in
+[telegram/README.md](../telegram/README.md).
+
 ## Things that will bite
 
 **A stopped loop doesn't watch the board.** If it stopped because everything was at `Needs Input` and
