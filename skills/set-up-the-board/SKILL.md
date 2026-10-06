@@ -21,7 +21,10 @@ one and stop getting improvements.
 When you're done, all of these exist and the owner has seen them:
 
 1. `<board>/setup.md` — their answers, in the section order of the shipped template
-2. `<board>/memory.md`, `<board>/tasks/`, `<board>/templates/` — copied from this repo, memory empty
+2. `<board>/protocol.md`, `<board>/board.base`, `<board>/memory.md`, `<board>/tasks/`,
+   `<board>/templates/` — copied from this repo, memory empty. In `board.base`, rewrite
+   `file.inFolder("tasks")` to `file.inFolder("<short name>/tasks")`: `~/boards` is opened as one
+   Obsidian vault, so Bases paths start there.
 3. `<repo>/.claude/agents/task-worker.md` and `<repo>/.claude/skills/babysit-prs/SKILL.md`
 4. `<repo>/.worktreeinclude`, and `.claude/worktrees/` in `<repo>/.gitignore`
 5. A one-screen summary of what you set and what they still have to do by hand
@@ -36,7 +39,7 @@ fine" is a complete answer and they can skip to the parts they care about.
 | Ask | Default |
 | --- | --- |
 | Which repositories, where, and what's each default branch? | the current repo |
-| Where should the board live? | `~/board` |
+| Where should the board live? | `~/boards/<short name>` — the folder name is the repo's short name |
 | Does a task's brief live in the note, or in an issue tracker you'd link to? | in the note |
 
 **Round 2 — what "ready" means.** This round decides more of the loop's behavior than the other
@@ -104,13 +107,15 @@ Run these and report what failed rather than fixing it silently:
   rather than a stale cached one.
 - The board path is readable by the agent session — on Claude Code that means `--add-dir <board>` or
   `permissions.additionalDirectories`.
+- `board check` (from `bin/board` in this repo) shows no `FAIL` line. It re-checks most of the above
+  for every board under `~/boards`, so a FAIL on another board is worth reporting too.
 
 ## Finish
 
 Show them: where the board is, what the review gate resolved to, what the loop will and won't do on
-its own, and the command to start it. Then tell them the first pass is worth watching rather than
-backgrounding, because the review gate is the part most likely to be subtly wrong and the first pass
-is where that shows.
+its own, and the command to start it: `board open <short name>`, then `/loop /babysit-prs`. Then
+tell them the first pass is worth watching rather than backgrounding, because the review gate is the
+part most likely to be subtly wrong and the first pass is where that shows.
 
 Don't seed `memory.md`. It's worth something only because it was earned one task at a time, and
 guesses about a codebase teach the loop to trust things nobody checked.
