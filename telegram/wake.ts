@@ -1,7 +1,7 @@
 // หา session ของ loop ใน herdr แล้วปลุกด้วย /loop /babysit-prs เมื่อ loop หยุดไปแล้ว
 // เหตุผล: loop ที่หยุดแล้วไม่เฝ้าบอร์ด (reference/running-it.md หัวข้อ "A stopped loop doesn't watch the board")
 // บอทแก้ไฟล์อย่างเดียวงานจะไม่ขยับ
-import { existsSync, openSync, readSync, closeSync, statSync, realpathSync } from "node:fs";
+import { existsSync, openSync, readSync, closeSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -86,14 +86,10 @@ export type LoopPane = {
   isLoop: boolean;
 };
 
-function sameDir(a: string, b: string): boolean {
-  const norm = (p: string) => {
-    try {
-      return realpathSync(p);
-    } catch {
-      return p.replace(/\/+$/, "");
-    }
-  };
+// เทียบเป็นสตริงเท่านั้น ห้ามแตะไฟล์ใน repo: บอทรันใต้ launchd ซึ่งไม่มีสิทธิ์ TCC ของ ~/Documents
+// realpath บน ~/Documents/GitHub/... จะค้างรอ dialog ขอสิทธิ์บนจอ Mac และแช่ทั้งบอท
+export function sameDir(a: string, b: string): boolean {
+  const norm = (p: string) => p.replace(/\/+$/, "");
   return norm(a) === norm(b);
 }
 
