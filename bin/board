@@ -21,7 +21,8 @@ usage() {
 board                สรุปทุกบอร์ด + งานที่รอเรา
 board open <name>    เปิด Claude Code ใน repo ของบอร์ด พร้อม --add-dir บอร์ด (ส่ง flag อื่นต่อท้ายได้)
 board check          ตรวจทุกบอร์ดว่ายังตรงกับ $LOOP_BOARD_DIR และ repo ยังพร้อมรัน loop
-board review [<name> [task|pr]] [--claude]  ตรวจงานในคิว Ready to Test / Testing · --claude = ส่งให้ Claude รีวิวเต็ม
+board review [<name> [task|pr]] [--claude|--grok|--codex|--agy]
+                     ตรวจงานในคิว Ready to Test / Testing · ใส่ flag = ส่งให้ CLI ตัวนั้นทำ Decision Card (อ่านอย่างเดียว)
 board approve <name> <task|pr>   ตั้ง Ready to Merge (เรา) · loop รอบหน้า merge
 board reject <name> <task|pr> "ข้อความ"   ตั้ง Needs Changes + เขียน Changes requested ต่อท้ายโน้ต
 
@@ -353,15 +354,17 @@ cmd_review() {
   local US=$'\x1f'
   local list="" count=0
 
-  # แยก flag ออกจาก positional ไม่ว่าจะวางไว้ตำแหน่งไหน
+  # แยก flag ออกจาก positional ไม่ว่าจะวางไว้ตำแหน่งไหน · flag = ตัวที่จะรีวิว (เลือกได้ตัวเดียว)
   for a in "$@"; do
     case "$a" in
-      --claude | -c) flag="--claude" ;;
-      -*) die "ไม่รู้จัก flag '$a'" ;;
+      --claude | -c | --grok | --codex | --agy)
+        [ -z "$flag" ] || die "เลือกตัวรีวิวได้ตัวเดียว ($flag กับ $a)"
+        flag="${a#--}"; [ "$flag" = "-c" ] && flag=claude ;;
+      -*) die "ไม่รู้จัก flag '$a' (มี --claude --grok --codex --agy)" ;;
       *) if [ -z "$name" ]; then name="$a"; elif [ -z "$task_or_pr" ]; then task_or_pr="$a"; fi ;;
     esac
   done
-  [ -n "$flag" ] && [ -z "$name" ] && die "ต้องระบุบอร์ดเมื่อใช้ --claude · ดูรายการด้วย: board review"
+  [ -n "$flag" ] && [ -z "$name" ] && die "ต้องระบุบอร์ดเมื่อใช้ --$flag · ดูรายการด้วย: board review"
 
   # ถ้าไม่ระบุชื่อบอร์ด: ลิสต์งานที่รอรีวิวทั้งหมด (Ready to Test / Testing)
   if [ -z "$name" ]; then
@@ -461,14 +464,28 @@ cmd_review() {
   fi
 
   printf '  %s────────────────────────────────────────────────────────────%s\n' "$DIM" "$RST"
-  if [ "$flag" = "--claude" ]; then
-    printf '  %s🤖 กำลังเปิดรีวิวแบบละเอียดด้วย Claude Code...%s\n\n' "$BOLD$GREEN" "$RST"
+  if [ -n "$flag" ]; then
+    # ทุกตัวรันแบบอ่านอย่างเดียว (plan / read-only sandbox) ตามกติกาของ skill
+    # claude โหลด skill เองผ่าน slash · ตัวอื่นให้อ่านไฟล์ skill จาก fork โดยตรง จะได้ไม่ต้องติดตั้ง skill ใน CLI นั้นก่อน
+    local skill="$LOOP_BOARD_DIR/skills/review-pr/SKILL.md" prompt bundle
+    [ -f "$skill" ] || die "ไม่เจอ $skill (LOOP_BOARD_DIR=$LOOP_BOARD_DIR)"
+    # ดึง PR มาวางเป็นไฟล์ให้ก่อน — codex sandbox read-only ไม่มีเน็ต, agy headless รันคำสั่งได้เฉพาะที่ allow ไว้
+    bundle=$(mktemp -d "${TMPDIR:-/tmp}/board-review.XXXXXX")
+    [ -n "${pr_json:-}" ] && printf '%s\n' "$pr_json" > "$bundle/pr.json"
+    (cd "$repo" && gh pr diff "$target_pr" > "$bundle/pr.diff" 2>/dev/null) || rm -f "$bundle/pr.diff"
+    prompt="Read $skill and follow it exactly to review $target_pr. The loop-board task note for this PR is $target_file. Pre-fetched for you: $bundle/pr.json (gh pr view --json title,state,headRefName,baseRefName,statusCheckRollup,files,body) and $bundle/pr.diff (gh pr diff); prefer these over calling gh yourself, and fall back to the local checkout in $repo if you need more. You are read-only: do not edit files, do not comment on the PR, do not change the task note. Output only the Decision Card."
+    command -v "$flag" >/dev/null 2>&1 || die "ไม่มีคำสั่ง '$flag' ในเครื่อง"
+    printf '  %s🤖 กำลังเปิดรีวิวแบบละเอียดด้วย %s...%s\n\n' "$BOLD$GREEN" "$flag" "$RST"
     cd "$repo"
-    exec claude --add-dir "$BOARDS_DIR/$name" -p "/review-pr $target_pr"
+    case "$flag" in
+      claude) exec claude --add-dir "$BOARDS_DIR/$name" -p "/review-pr $target_pr" ;;
+      grok)   exec grok --cwd "$repo" --permission-mode plan -p "$prompt" ;;
+      codex)  exec codex exec -C "$repo" --add-dir "$BOARDS_DIR/$name" -s read-only --skip-git-repo-check "$prompt" ;;
+      agy)    exec agy --add-dir "$BOARDS_DIR/$name" --mode plan -p "$prompt" ;;
+    esac
   else
-    printf '  %sคำสั่งเปิดรีวิวแบบเต็มด้วย Claude Code AI:%s\n' "$BOLD$GREEN" "$RST"
-    printf '  board review %s %s --claude\n' "$name" "$pr_num"
-    printf '  %sหรือสั่งตรง:%s (cd %s && claude --add-dir "%s" -p "/review-pr %s")\n\n' "$DIM" "$RST" "$repo" "$BOARDS_DIR/$name" "$target_pr"
+    printf '  %sเปิดรีวิวแบบเต็ม (เลือกตัวรีวิว):%s\n' "$BOLD$GREEN" "$RST"
+    printf '  board review %s %s --claude   # หรือ --grok · --codex · --agy\n' "$name" "$pr_num"
     printf '  %sหรือเปิด session ทำงานต่อ:%s board open %s\n\n' "$DIM" "$RST" "$name"
     printf '  %sตัดสินแล้ว:%s board approve %s %s  ·  board reject %s %s "สิ่งที่ให้แก้"\n' "$BOLD" "$RST" "$name" "$task_name" "$name" "$task_name"
   fi

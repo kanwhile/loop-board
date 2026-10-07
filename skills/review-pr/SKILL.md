@@ -9,6 +9,8 @@ Instead of requiring the human to manually read every line of a 20-file diff or 
 
 ## Read-only — the reviewer never acts on the human's behalf
 
+This skill is run by whichever CLI the human picked (`board review … --claude|--grok|--codex|--agy`). The rules and the output format are the same for all of them.
+
 - Do not edit, commit, push, or check out branches in the repo. Reading files and running read-only checks (`gh pr diff`, `gh pr view`, tests against a local DB, `git log`) is fine; leave the working tree exactly as you found it.
 - Do not post comments, reviews, or approvals on the PR, and never merge. The card is the only output.
 - Do not change any task file under `~/boards/`. `Ready to Merge` and `Needs Changes` are set by the human (see `board/protocol.md`); tell them what to set, don't set it.
