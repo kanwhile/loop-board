@@ -20,6 +20,7 @@ Clone it, and install the onboarding skill so you can invoke it:
 git clone https://github.com/<you>/loop-board ~/loop-board
 mkdir -p ~/.claude/skills
 cp -R ~/loop-board/skills/set-up-the-board ~/.claude/skills/
+cp -R ~/loop-board/skills/review-pr ~/.claude/skills/   # optional: used by `board review --claude`
 ```
 
 **Restart your agent session now.** The file watcher only covers directories that existed when the
@@ -79,6 +80,7 @@ Three layers, each doing one thing:
 | **Protocol** (`board/protocol.md`) | the rules | — |
 | **Loop** (`skills/babysit-prs`) | reads the board, runs the forge CLI, writes frontmatter, dispatches | writes code, touches a working tree |
 | **Worker** (`agents/task-worker.md`) | writes code in its own worktree, reports back | touches the board, talks to you |
+| **Reviewer** (`skills/review-pr`) | reads a PR waiting in Ready to Test, writes a decision card for you | edits anything, comments on the PR, sets a status |
 
 The board is a folder of markdown files, one per task, with `status` in the frontmatter. Ten statuses,
 and each one names who's allowed to set it. Three are yours alone — `Testing`, `Needs Changes`,
@@ -102,6 +104,7 @@ board/
 skills/
   set-up-the-board/    the onboarding interview
   babysit-prs/         one pass of the protocol
+  review-pr/           decision card for a PR, run by `board review --claude`
 agents/
   task-worker.md       the worktree-isolated worker
 reference/
