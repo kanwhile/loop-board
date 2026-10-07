@@ -21,6 +21,7 @@ usage() {
 board                สรุปทุกบอร์ด + งานที่รอเรา
 board open <name>    เปิด Claude Code ใน repo ของบอร์ด พร้อม --add-dir บอร์ด (ส่ง flag อื่นต่อท้ายได้)
 board check          ตรวจทุกบอร์ดว่ายังตรงกับ $LOOP_BOARD_DIR และ repo ยังพร้อมรัน loop
+board review [<name> [task|pr]] [--claude]  ตรวจงานในคิว Ready to Test / Testing · --claude = ส่งให้ Claude รีวิวเต็ม
 
 บอร์ดอยู่ที่ $BOARDS_DIR (เปลี่ยนได้ด้วย BOARDS_DIR=...)
 EOF
@@ -288,10 +289,191 @@ cmd_check() {
   return $bad
 }
 
+cmd_review() {
+  local name="" task_or_pr="" flag="" a
+  local b f s p pr task repo
+  local US=$'\x1f'
+  local list="" count=0
+
+  # แยก flag ออกจาก positional ไม่ว่าจะวางไว้ตำแหน่งไหน
+  for a in "$@"; do
+    case "$a" in
+      --claude | -c) flag="--claude" ;;
+      -*) die "ไม่รู้จัก flag '$a'" ;;
+      *) if [ -z "$name" ]; then name="$a"; elif [ -z "$task_or_pr" ]; then task_or_pr="$a"; fi ;;
+    esac
+  done
+  [ -n "$flag" ] && [ -z "$name" ] && die "ต้องระบุบอร์ดเมื่อใช้ --claude · ดูรายการด้วย: board review"
+
+  # ถ้าไม่ระบุชื่อบอร์ด: ลิสต์งานที่รอรีวิวทั้งหมด (Ready to Test / Testing)
+  if [ -z "$name" ]; then
+    printf '  %s%sงานที่รอรีวิว (Ready to Test / Testing)%s\n' "$BOLD" "$YELLOW" "$RST"
+    for b in $(boards); do
+      for f in "$BOARDS_DIR/$b"/tasks/*.md; do
+        [ -f "$f" ] || continue
+        s=$(field_of "$f" status)
+        case "$s" in
+          "Ready to Test" | "Testing")
+            pr=$(field_of "$f" pr)
+            task=$(basename "$f" .md)
+            count=$((count + 1))
+            list="$list$b$US$task$US$s$US$pr"$'\n'
+            ;;
+        esac
+      done
+    done
+    if [ "$count" -eq 0 ]; then
+      printf '  %s✓%s ไม่มีงานในสถานะ Ready to Test หรือ Testing\n' "$GREEN" "$RST"
+      return 0
+    fi
+    printf '%s' "$list" | while IFS=$US read -r b t s p; do
+      local pr_num
+      pr_num=$(basename "$p")
+      printf '  %s●%s %s%-14s%s %s%-13s%s %-32s %sPR #%-4s%s\n' \
+        "$YELLOW" "$RST" "$BOLD" "$b" "$RST" "$CYAN" "$s" "$RST" "$t" "$DIM" "$pr_num" "$RST"
+      if [ -n "$p" ]; then
+        printf '    %s%s%s\n' "$DIM" "$p" "$RST"
+      fi
+    done
+    echo
+    printf '  %sเลือกตรวจงานด้วย:%s board review <board> [task-or-pr] [--claude]\n' "$BOLD" "$RST"
+    printf '  %sเช่น:%s board review passadu-v2 165\n' "$DIM" "$RST"
+    return 0
+  fi
+
+  [ -d "$BOARDS_DIR/$name" ] || die "ไม่มีบอร์ด '$name' ใน $BOARDS_DIR"
+  repo=$(repo_path "$name") || die "อ่าน path repo ไม่ได้"
+
+  # ค้นหาไฟล์ task ในบอร์ด
+  local target_file="" target_pr=""
+  if [ -n "$task_or_pr" ]; then
+    if [ -f "$BOARDS_DIR/$name/tasks/$task_or_pr.md" ]; then
+      target_file="$BOARDS_DIR/$name/tasks/$task_or_pr.md"
+    elif [ -f "$BOARDS_DIR/$name/tasks/$task_or_pr" ]; then
+      target_file="$BOARDS_DIR/$name/tasks/$task_or_pr"
+    else
+      # เลข = เลข PR ต้องตรงเป๊ะ · ข้อความ = prefix ของชื่อ task · เจอหลายงานให้เลือก ไม่เดา
+      local clean_num="${task_or_pr###}"
+      local matches=()
+      for f in "$BOARDS_DIR/$name"/tasks/*.md; do
+        [ -f "$f" ] || continue
+        p=$(field_of "$f" pr)
+        if [ -n "$p" ] && [ "$(basename "$p")" = "$clean_num" ]; then
+          matches=("$f")
+          break
+        fi
+        case "$(basename "$f" .md)" in
+          "$task_or_pr"*) matches+=("$f") ;;
+        esac
+      done
+      if [ "${#matches[@]}" -eq 1 ]; then
+        target_file="${matches[0]}"
+      elif [ "${#matches[@]}" -gt 1 ]; then
+        printf '  %s'"'"'%s'"'"' ตรงกับ %d งานใน %s — ระบุให้ชัดกว่านี้:%s\n' "$BOLD" "$task_or_pr" "${#matches[@]}" "$name" "$RST"
+        for f in "${matches[@]}"; do
+          printf '    board review %s %s\n' "$name" "$(basename "$f" .md)"
+        done
+        return 1
+      fi
+    fi
+  else
+    local found_tasks=()
+    for f in "$BOARDS_DIR/$name"/tasks/*.md; do
+      [ -f "$f" ] || continue
+      s=$(field_of "$f" status)
+      case "$s" in
+        "Ready to Test" | "Testing") found_tasks+=("$f") ;;
+      esac
+    done
+    if [ "${#found_tasks[@]}" -eq 1 ]; then
+      target_file="${found_tasks[0]}"
+    elif [ "${#found_tasks[@]}" -gt 1 ]; then
+      printf '  %sบอร์ด %s มีงานรอรีวิว %d งาน — กรุณาระบุงาน:%s\n' "$BOLD" "$name" "${#found_tasks[@]}" "$RST"
+      for f in "${found_tasks[@]}"; do
+        printf '    board review %s %s\n' "$name" "$(basename "$f" .md)"
+      done
+      return 0
+    else
+      die "ไม่มีงานในสถานะ Ready to Test ในบอร์ด $name"
+    fi
+  fi
+
+  [ -n "$target_file" ] && [ -f "$target_file" ] || die "ไม่เจองาน '$task_or_pr' ใน $name"
+  local task_name
+  task_name=$(basename "$target_file" .md)
+  [ -n "$target_pr" ] || target_pr=$(field_of "$target_file" pr)
+  [ -n "$target_pr" ] || die "งาน $task_name ไม่มี field 'pr:' ใน frontmatter"
+
+  local pr_num
+  pr_num=$(basename "$target_pr")
+
+  printf '\n  %s=== 📋 Pre-Review Inspection: %s / %s (PR #%s) ===%s\n\n' "$BOLD$CYAN" "$name" "$task_name" "$pr_num" "$RST"
+  printf '  %sTask:%s   %s\n' "$BOLD" "$RST" "${target_file/#$HOME/~}"
+  printf '  %sPR:%s     %s\n' "$BOLD" "$RST" "$target_pr"
+  printf '  %sRepo:%s   %s\n\n' "$BOLD" "$RST" "${repo/#$HOME/~}"
+
+  if command -v gh >/dev/null 2>&1; then
+    printf '  %s🔍 ดึงข้อมูล PR จาก GitHub...%s\n\n' "$DIM" "$RST"
+    local pr_json
+    if pr_json=$(cd "$repo" && gh pr view "$target_pr" --json title,state,headRefName,baseRefName,statusCheckRollup,files,body 2>/dev/null); then
+      local pr_title head_branch base_branch nfiles
+      pr_title=$(echo "$pr_json" | jq -r .title 2>/dev/null || echo "")
+      head_branch=$(echo "$pr_json" | jq -r .headRefName 2>/dev/null || echo "")
+      base_branch=$(echo "$pr_json" | jq -r .baseRefName 2>/dev/null || echo "")
+      nfiles=$(echo "$pr_json" | jq '.files | length' 2>/dev/null || echo 0)
+
+      printf '  %sTitle:%s    %s\n' "$BOLD" "$RST" "$pr_title"
+      printf '  %sBranch:%s   %s → %s\n' "$BOLD" "$RST" "$head_branch" "$base_branch"
+      printf '  %sFiles:%s    %s ไฟล์ที่เปลี่ยนแปลง\n\n' "$BOLD" "$RST" "$nfiles"
+
+      printf '  %sCI / Checks:%s\n' "$BOLD" "$RST"
+      echo "$pr_json" | jq -r '.statusCheckRollup[]? | "    \(if .conclusion == "SUCCESS" or .state == "SUCCESS" then "🟢" elif .conclusion == "FAILURE" or .state == "FAILURE" then "🔴" else "🟡" end) \(.name // .context): \(.conclusion // .state // "RUNNING")"' 2>/dev/null || true
+      echo
+
+      printf '  %sChanged Files:%s\n' "$BOLD" "$RST"
+      echo "$pr_json" | jq -r '.files[]? | "    \(.path) (+\(.additions) -\(.deletions))"' 2>/dev/null | head -n 12 || true
+      if [ "$nfiles" -gt 12 ]; then
+        printf '    %s... และอีก %d ไฟล์%s\n' "$DIM" "$((nfiles - 12))" "$RST"
+      fi
+      echo
+
+      # สรุป Verified จาก PR body
+      local verified_text
+      verified_text=$(echo "$pr_json" | jq -r .body 2>/dev/null | awk '/^## Verified/{f=1; next} /^## /{f=0} f' | sed '/^[[:space:]]*$/d')
+      if [ -n "$verified_text" ]; then
+        printf '  %sEvidence (## Verified):%s\n' "$BOLD" "$RST"
+        echo "$verified_text" | head -n 10 | sed 's/^/    /'
+        if [ "$(echo "$verified_text" | wc -l)" -gt 10 ]; then
+          printf '    %s... (ดูเพิ่มเติมใน PR)%s\n' "$DIM" "$RST"
+        fi
+        echo
+      fi
+    else
+      printf '  %s⚠ ดึงข้อมูล PR ไม่ได้ (gh pr view ล้มเหลว — เช็ค gh auth status หรือเน็ต)%s\n\n' "$YELLOW" "$RST"
+    fi
+  else
+    printf '  %s⚠ ไม่มี gh — ข้ามการดึงข้อมูล PR%s\n\n' "$YELLOW" "$RST"
+  fi
+
+  printf '  %s────────────────────────────────────────────────────────────%s\n' "$DIM" "$RST"
+  if [ "$flag" = "--claude" ]; then
+    printf '  %s🤖 กำลังเปิดรีวิวแบบละเอียดด้วย Claude Code...%s\n\n' "$BOLD$GREEN" "$RST"
+    cd "$repo"
+    exec claude --add-dir "$BOARDS_DIR/$name" -p "/review-pr $target_pr"
+  else
+    printf '  %sคำสั่งเปิดรีวิวแบบเต็มด้วย Claude Code AI:%s\n' "$BOLD$GREEN" "$RST"
+    printf '  board review %s %s --claude\n' "$name" "$pr_num"
+    printf '  %sหรือสั่งตรง:%s (cd %s && claude --add-dir "%s" -p "/review-pr %s")\n\n' "$DIM" "$RST" "$repo" "$BOARDS_DIR/$name" "$target_pr"
+    printf '  %sหรือเปิด session ทำงานต่อ:%s board open %s\n' "$DIM" "$RST" "$name"
+  fi
+  printf '  %s────────────────────────────────────────────────────────────%s\n\n' "$DIM" "$RST"
+}
+
 case "${1:-ls}" in
   ls | list) cmd_list ;;
   open) shift; cmd_open "$@" ;;
   check) cmd_check ;;
+  review) shift; cmd_review "$@" ;;
   -h | --help | help) usage ;;
   *) usage; exit 1 ;;
 esac
