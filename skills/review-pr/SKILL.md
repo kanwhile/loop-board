@@ -120,19 +120,22 @@ Output the final review in this structured, actionable markdown format:
 <Choose the appropriate action block:>
 
 <!-- If 🟢 LGTM: -->
-**Mark Ready to Merge:**
-In `~/boards/<board>/tasks/<task>.md`, update:
-`status: Ready to Merge`
-*(Or in terminal: loop-board will auto-merge and mark Done on next loop run)*
+**Mark Ready to Merge** (only you can set this; the loop re-verifies and merges on its next pass):
+```bash
+board approve <board> <task>
+```
+
+<!-- If 🟡 Smoke Test: -->
+**After the smoke test passes:** `board approve <board> <task>` · if it fails, use the reject command below with what you saw.
 
 <!-- If 🔴 Changes Requested: -->
-**Request Changes:**
-In `~/boards/<board>/tasks/<task>.md`, set `status: Needs Changes` and append:
-```markdown
-Changes requested:
-- <Exact feedback item 1>
-- <Exact feedback item 2>
+**Request Changes** (sets `Needs Changes` and appends the block the loop acts on):
+```bash
+board reject <board> <task> "- <Exact feedback item 1>
+- <Exact feedback item 2>"
 ```
 ````
+
+The commands above are for the human to run. You never run `board approve` or `board reject` yourself.
 
 Keep the report concise, objective, and focused on making the human decision effortless.
