@@ -21,7 +21,10 @@ usage() {
 board                สรุปทุกบอร์ด + งานที่รอเรา
 board open <name>    เปิด Claude Code ใน repo ของบอร์ด พร้อม --add-dir บอร์ด (ส่ง flag อื่นต่อท้ายได้)
 board check          ตรวจทุกบอร์ดว่ายังตรงกับ $LOOP_BOARD_DIR และ repo ยังพร้อมรัน loop
-board review [<name> [task|pr]] [--claude]  ตรวจงานในคิว Ready to Test / Testing · --claude = ส่งให้ Claude รีวิวเต็ม
+board review [<name> [task|pr]] [--claude|--grok|--codex|--agy]
+                     ตรวจงานในคิว Ready to Test / Testing · ใส่ flag = ส่งให้ CLI ตัวนั้นทำ Decision Card (อ่านอย่างเดียว)
+board approve <name> <task|pr>   ตั้ง Ready to Merge (เรา) · loop รอบหน้า merge
+board reject <name> <task|pr> "ข้อความ"   ตั้ง Needs Changes + เขียน Changes requested ต่อท้ายโน้ต
 
 บอร์ดอยู่ที่ $BOARDS_DIR (เปลี่ยนได้ด้วย BOARDS_DIR=...)
 EOF
@@ -289,21 +292,79 @@ cmd_check() {
   return $bad
 }
 
+# หาไฟล์ task ในบอร์ด · พิมพ์ path ออก stdout
+#   <arg> ว่าง      → งานเดียวที่รอรีวิว (Ready to Test / Testing) ไม่งั้นลิสต์ให้เลือก
+#   <arg> เป็นเลข   → ต้องตรงเลข PR เป๊ะ
+#   <arg> ข้อความ   → prefix ของชื่อ task · ตรงหลายงาน → ลิสต์ให้เลือก ไม่เดา
+# คืน 1 เมื่อไม่เจอหรือคลุมเครือ (ข้อความไป stderr) · $3 = ชื่อคำสั่งที่จะโชว์ในคำแนะนำ
+find_task() {
+  local name="$1" arg="$2" cmd="${3:-review}"
+  local f p s tasks="$BOARDS_DIR/$name/tasks"
+  local matches=()
+  if [ -n "$arg" ]; then
+    if [ -f "$tasks/$arg.md" ]; then echo "$tasks/$arg.md"; return 0; fi
+    if [ -f "$tasks/$arg" ]; then echo "$tasks/$arg"; return 0; fi
+    local clean_num="${arg###}"
+    for f in "$tasks"/*.md; do
+      [ -f "$f" ] || continue
+      p=$(field_of "$f" pr)
+      if [ -n "$p" ] && [ "$(basename "$p")" = "$clean_num" ]; then
+        echo "$f"; return 0
+      fi
+      case "$(basename "$f" .md)" in
+        "$arg"*) matches+=("$f") ;;
+      esac
+    done
+    [ "${#matches[@]}" -gt 0 ] || { echo "board: ไม่เจองาน '$arg' ใน $name" >&2; return 1; }
+    [ "${#matches[@]}" -eq 1 ] && { echo "${matches[0]}"; return 0; }
+    printf '  %s'"'"'%s'"'"' ตรงกับ %d งานใน %s — ระบุให้ชัดกว่านี้:%s\n' "$BOLD" "$arg" "${#matches[@]}" "$name" "$RST" >&2
+  else
+    for f in "$tasks"/*.md; do
+      [ -f "$f" ] || continue
+      s=$(field_of "$f" status)
+      case "$s" in
+        "Ready to Test" | "Testing") matches+=("$f") ;;
+      esac
+    done
+    [ "${#matches[@]}" -gt 0 ] || { echo "board: ไม่มีงานในสถานะ Ready to Test / Testing ในบอร์ด $name" >&2; return 1; }
+    [ "${#matches[@]}" -eq 1 ] && { echo "${matches[0]}"; return 0; }
+    printf '  %sบอร์ด %s มีงานรอรีวิว %d งาน — ระบุงาน:%s\n' "$BOLD" "$name" "${#matches[@]}" "$RST" >&2
+  fi
+  for f in "${matches[@]}"; do
+    printf '    board %s %s %s\n' "$cmd" "$name" "$(basename "$f" .md)" >&2
+  done
+  return 1
+}
+
+# ตั้งค่า field ใน frontmatter (แทนที่บรรทัดเดิม หรือเพิ่มก่อน --- ปิดถ้ายังไม่มี) · เขียนลง temp แล้ว mv
+set_field() {
+  local file="$1" key="$2" val="$3" tmp
+  tmp=$(mktemp "$(dirname "$file")/.board.XXXXXX") || die "สร้าง temp ไม่ได้"
+  awk -v k="$key" -v v="$val" '
+    NR == 1 && $0 == "---" { fm = 1; print; next }
+    fm == 1 && $0 == "---" { if (!done) { print k ": " v; done = 1 } fm = 2; print; next }
+    fm == 1 && index($0, k ":") == 1 { if (!done) { print k ": " v; done = 1 } next }
+    { print }
+  ' "$file" > "$tmp" && mv "$tmp" "$file" || { rm -f "$tmp"; die "เขียน $file ไม่ได้"; }
+}
+
 cmd_review() {
   local name="" task_or_pr="" flag="" a
   local b f s p pr task repo
   local US=$'\x1f'
   local list="" count=0
 
-  # แยก flag ออกจาก positional ไม่ว่าจะวางไว้ตำแหน่งไหน
+  # แยก flag ออกจาก positional ไม่ว่าจะวางไว้ตำแหน่งไหน · flag = ตัวที่จะรีวิว (เลือกได้ตัวเดียว)
   for a in "$@"; do
     case "$a" in
-      --claude | -c) flag="--claude" ;;
-      -*) die "ไม่รู้จัก flag '$a'" ;;
+      --claude | -c | --grok | --codex | --agy)
+        [ -z "$flag" ] || die "เลือกตัวรีวิวได้ตัวเดียว ($flag กับ $a)"
+        flag="${a#--}"; [ "$flag" = "-c" ] && flag=claude ;;
+      -*) die "ไม่รู้จัก flag '$a' (มี --claude --grok --codex --agy)" ;;
       *) if [ -z "$name" ]; then name="$a"; elif [ -z "$task_or_pr" ]; then task_or_pr="$a"; fi ;;
     esac
   done
-  [ -n "$flag" ] && [ -z "$name" ] && die "ต้องระบุบอร์ดเมื่อใช้ --claude · ดูรายการด้วย: board review"
+  [ -n "$flag" ] && [ -z "$name" ] && die "ต้องระบุบอร์ดเมื่อใช้ --$flag · ดูรายการด้วย: board review"
 
   # ถ้าไม่ระบุชื่อบอร์ด: ลิสต์งานที่รอรีวิวทั้งหมด (Ready to Test / Testing)
   if [ -z "$name" ]; then
@@ -344,61 +405,8 @@ cmd_review() {
   [ -d "$BOARDS_DIR/$name" ] || die "ไม่มีบอร์ด '$name' ใน $BOARDS_DIR"
   repo=$(repo_path "$name") || die "อ่าน path repo ไม่ได้"
 
-  # ค้นหาไฟล์ task ในบอร์ด
   local target_file="" target_pr=""
-  if [ -n "$task_or_pr" ]; then
-    if [ -f "$BOARDS_DIR/$name/tasks/$task_or_pr.md" ]; then
-      target_file="$BOARDS_DIR/$name/tasks/$task_or_pr.md"
-    elif [ -f "$BOARDS_DIR/$name/tasks/$task_or_pr" ]; then
-      target_file="$BOARDS_DIR/$name/tasks/$task_or_pr"
-    else
-      # เลข = เลข PR ต้องตรงเป๊ะ · ข้อความ = prefix ของชื่อ task · เจอหลายงานให้เลือก ไม่เดา
-      local clean_num="${task_or_pr###}"
-      local matches=()
-      for f in "$BOARDS_DIR/$name"/tasks/*.md; do
-        [ -f "$f" ] || continue
-        p=$(field_of "$f" pr)
-        if [ -n "$p" ] && [ "$(basename "$p")" = "$clean_num" ]; then
-          matches=("$f")
-          break
-        fi
-        case "$(basename "$f" .md)" in
-          "$task_or_pr"*) matches+=("$f") ;;
-        esac
-      done
-      if [ "${#matches[@]}" -eq 1 ]; then
-        target_file="${matches[0]}"
-      elif [ "${#matches[@]}" -gt 1 ]; then
-        printf '  %s'"'"'%s'"'"' ตรงกับ %d งานใน %s — ระบุให้ชัดกว่านี้:%s\n' "$BOLD" "$task_or_pr" "${#matches[@]}" "$name" "$RST"
-        for f in "${matches[@]}"; do
-          printf '    board review %s %s\n' "$name" "$(basename "$f" .md)"
-        done
-        return 1
-      fi
-    fi
-  else
-    local found_tasks=()
-    for f in "$BOARDS_DIR/$name"/tasks/*.md; do
-      [ -f "$f" ] || continue
-      s=$(field_of "$f" status)
-      case "$s" in
-        "Ready to Test" | "Testing") found_tasks+=("$f") ;;
-      esac
-    done
-    if [ "${#found_tasks[@]}" -eq 1 ]; then
-      target_file="${found_tasks[0]}"
-    elif [ "${#found_tasks[@]}" -gt 1 ]; then
-      printf '  %sบอร์ด %s มีงานรอรีวิว %d งาน — กรุณาระบุงาน:%s\n' "$BOLD" "$name" "${#found_tasks[@]}" "$RST"
-      for f in "${found_tasks[@]}"; do
-        printf '    board review %s %s\n' "$name" "$(basename "$f" .md)"
-      done
-      return 0
-    else
-      die "ไม่มีงานในสถานะ Ready to Test ในบอร์ด $name"
-    fi
-  fi
-
-  [ -n "$target_file" ] && [ -f "$target_file" ] || die "ไม่เจองาน '$task_or_pr' ใน $name"
+  target_file=$(find_task "$name" "$task_or_pr" review) || exit $?
   local task_name
   task_name=$(basename "$target_file" .md)
   [ -n "$target_pr" ] || target_pr=$(field_of "$target_file" pr)
@@ -456,17 +464,70 @@ cmd_review() {
   fi
 
   printf '  %s────────────────────────────────────────────────────────────%s\n' "$DIM" "$RST"
-  if [ "$flag" = "--claude" ]; then
-    printf '  %s🤖 กำลังเปิดรีวิวแบบละเอียดด้วย Claude Code...%s\n\n' "$BOLD$GREEN" "$RST"
+  if [ -n "$flag" ]; then
+    # ทุกตัวรันแบบอ่านอย่างเดียว (plan / read-only sandbox) ตามกติกาของ skill
+    # claude โหลด skill เองผ่าน slash · ตัวอื่นให้อ่านไฟล์ skill จาก fork โดยตรง จะได้ไม่ต้องติดตั้ง skill ใน CLI นั้นก่อน
+    local skill="$LOOP_BOARD_DIR/skills/review-pr/SKILL.md" prompt bundle
+    [ -f "$skill" ] || die "ไม่เจอ $skill (LOOP_BOARD_DIR=$LOOP_BOARD_DIR)"
+    # ดึง PR มาวางเป็นไฟล์ให้ก่อน — codex sandbox read-only ไม่มีเน็ต, agy headless รันคำสั่งได้เฉพาะที่ allow ไว้
+    bundle=$(mktemp -d "${TMPDIR:-/tmp}/board-review.XXXXXX")
+    [ -n "${pr_json:-}" ] && printf '%s\n' "$pr_json" > "$bundle/pr.json"
+    (cd "$repo" && gh pr diff "$target_pr" > "$bundle/pr.diff" 2>/dev/null) || rm -f "$bundle/pr.diff"
+    prompt="Read $skill and follow it exactly to review $target_pr. The loop-board task note for this PR is $target_file. Pre-fetched for you: $bundle/pr.json (gh pr view --json title,state,headRefName,baseRefName,statusCheckRollup,files,body) and $bundle/pr.diff (gh pr diff); prefer these over calling gh yourself, and fall back to the local checkout in $repo if you need more. You are read-only: do not edit files, do not comment on the PR, do not change the task note. Output only the Decision Card."
+    command -v "$flag" >/dev/null 2>&1 || die "ไม่มีคำสั่ง '$flag' ในเครื่อง"
+    printf '  %s🤖 กำลังเปิดรีวิวแบบละเอียดด้วย %s...%s\n\n' "$BOLD$GREEN" "$flag" "$RST"
     cd "$repo"
-    exec claude --add-dir "$BOARDS_DIR/$name" -p "/review-pr $target_pr"
+    case "$flag" in
+      claude) exec claude --add-dir "$BOARDS_DIR/$name" -p "/review-pr $target_pr" ;;
+      grok)   exec grok --cwd "$repo" --permission-mode plan -p "$prompt" ;;
+      codex)  exec codex exec -C "$repo" --add-dir "$BOARDS_DIR/$name" -s read-only --skip-git-repo-check "$prompt" ;;
+      agy)    exec agy --add-dir "$BOARDS_DIR/$name" --mode plan -p "$prompt" ;;
+    esac
   else
-    printf '  %sคำสั่งเปิดรีวิวแบบเต็มด้วย Claude Code AI:%s\n' "$BOLD$GREEN" "$RST"
-    printf '  board review %s %s --claude\n' "$name" "$pr_num"
-    printf '  %sหรือสั่งตรง:%s (cd %s && claude --add-dir "%s" -p "/review-pr %s")\n\n' "$DIM" "$RST" "$repo" "$BOARDS_DIR/$name" "$target_pr"
-    printf '  %sหรือเปิด session ทำงานต่อ:%s board open %s\n' "$DIM" "$RST" "$name"
+    printf '  %sเปิดรีวิวแบบเต็ม (เลือกตัวรีวิว):%s\n' "$BOLD$GREEN" "$RST"
+    printf '  board review %s %s --claude   # หรือ --grok · --codex · --agy\n' "$name" "$pr_num"
+    printf '  %sหรือเปิด session ทำงานต่อ:%s board open %s\n\n' "$DIM" "$RST" "$name"
+    printf '  %sตัดสินแล้ว:%s board approve %s %s  ·  board reject %s %s "สิ่งที่ให้แก้"\n' "$BOLD" "$RST" "$name" "$task_name" "$name" "$task_name"
   fi
   printf '  %s────────────────────────────────────────────────────────────%s\n\n' "$DIM" "$RST"
+}
+
+# คนตั้ง Ready to Merge เอง (status นี้ loop ตั้งไม่ได้ตาม protocol) — คำสั่งนี้แค่ประหยัดการเปิด editor
+cmd_approve() {
+  local name="${1:-}" arg="${2:-}" f s task
+  [ -n "$name" ] || die "ใช้: board approve <board> <task|pr>"
+  [ -d "$BOARDS_DIR/$name" ] || die "ไม่มีบอร์ด '$name' ใน $BOARDS_DIR"
+  f=$(find_task "$name" "$arg" approve) || exit $?
+  task=$(basename "$f" .md)
+  s=$(field_of "$f" status)
+  case "$s" in
+    "Ready to Test" | "Testing") ;;
+    "Ready to Merge") die "$task เป็น Ready to Merge อยู่แล้ว" ;;
+    *) die "$task อยู่ที่ '$s' — approve ได้เฉพาะ Ready to Test / Testing (ยังไม่ผ่านตา loop หรือถูกส่งกลับไปแล้ว)" ;;
+  esac
+  set_field "$f" status "Ready to Merge"
+  set_field "$f" status_since "$(date +'%Y-%m-%d %H:%M')"
+  printf '  %s✓%s %s/%s → %sReady to Merge%s · loop รอบหน้าจะ re-verify แล้ว merge\n' "$GREEN" "$RST" "$name" "$task" "$BOLD" "$RST"
+}
+
+# คนตั้ง Needs Changes + เขียนบล็อก "Changes requested:" ต่อท้ายโน้ต (loop อ่านบล็อกล่างสุด)
+cmd_reject() {
+  local name="${1:-}" arg="${2:-}" msg="${3:-}" f s task
+  [ -n "$name" ] || die "ใช้: board reject <board> <task|pr> \"สิ่งที่ให้แก้\"  (หรือ pipe ข้อความทาง stdin)"
+  [ -d "$BOARDS_DIR/$name" ] || die "ไม่มีบอร์ด '$name' ใน $BOARDS_DIR"
+  f=$(find_task "$name" "$arg" reject) || exit $?
+  task=$(basename "$f" .md)
+  if [ -z "$msg" ] && [ ! -t 0 ]; then msg=$(cat); fi
+  [ -n "$msg" ] || die "ต้องบอกว่าให้แก้อะไร — loop จะได้ไม่ต้องเดา"
+  s=$(field_of "$f" status)
+  case "$s" in
+    "Ready to Test" | "Testing" | "Needs Input") ;;
+    *) die "$task อยู่ที่ '$s' — reject ได้เฉพาะงานที่รอเรา (Ready to Test / Testing / Needs Input)" ;;
+  esac
+  set_field "$f" status "Needs Changes"
+  set_field "$f" status_since "$(date +'%Y-%m-%d %H:%M')"
+  printf '\nChanges requested (%s):\n\n%s\n' "$(date +%Y-%m-%d)" "$msg" >> "$f"
+  printf '  %s✓%s %s/%s → %sNeeds Changes%s · เขียน Changes requested ต่อท้ายโน้ตแล้ว loop รอบหน้าจะส่ง worker กลับไปแก้บน PR เดิม\n' "$YELLOW" "$RST" "$name" "$task" "$BOLD" "$RST"
 }
 
 case "${1:-ls}" in
@@ -474,6 +535,8 @@ case "${1:-ls}" in
   open) shift; cmd_open "$@" ;;
   check) cmd_check ;;
   review) shift; cmd_review "$@" ;;
+  approve) shift; cmd_approve "$@" ;;
+  reject) shift; cmd_reject "$@" ;;
   -h | --help | help) usage ;;
   *) usage; exit 1 ;;
 esac
