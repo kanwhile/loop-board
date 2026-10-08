@@ -52,6 +52,11 @@ cat >"$PLIST" <<EOF
 EOF
 
 launchctl bootout "$DOMAIN/$LABEL" 2>/dev/null || true
+# bootout คืนก่อนตัวเก่าปิดเสร็จ ถ้า bootstrap ทันทีจะได้ "Bootstrap failed: 5"
+for _ in $(seq 20); do
+  launchctl print "$DOMAIN/$LABEL" >/dev/null 2>&1 || break
+  sleep 0.5
+done
 launchctl bootstrap "$DOMAIN" "$PLIST"
 echo "ติดตั้งแล้ว: $LABEL"
 echo "log: tail -f $LOG"

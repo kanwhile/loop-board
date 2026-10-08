@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ageOf, readTask, repoPath, scanTasks, updateNote, Conflict } from "./boards";
 import { appendChangesRequested, formatValue, readFields, setField, titleOf } from "./frontmatter";
-import { card, cb, parseCb } from "./messages";
+import { boardButtons, boardText, card, cb, parseCb } from "./messages";
 import { diff, emptyState, idFor, rememberReply } from "./state";
 import { loopStateFromTranscript, pickLoopPane, ranLoop, wakeLoop, type LoopPane } from "./wake";
 
@@ -229,6 +229,58 @@ describe("messages", () => {
     const c = card({ ...t, status: "Needs Input", question: "<b>x</b> & y" }, "1");
     expect(c.text).toContain("&lt;b&gt;x&lt;/b&gt; &amp; y");
     expect(c.replyTarget).toBe("answer");
+  });
+});
+
+describe("board summary", () => {
+  const t = (board: string, task: string, status: string, extra: object = {}) => ({
+    key: `${board}/${task}`,
+    board,
+    task,
+    path: "",
+    status,
+    pr: "",
+    question: "",
+    answer: "",
+    statusSince: "",
+    filesChanged: "",
+    title: "",
+    ...extra,
+  });
+  const tasks = [
+    t("alpha", "done-1", "Done"),
+    t("alpha", "wip", "In Progress"),
+    t("beta", "csv", "Ready to Test", { pr: "https://github.com/x/y/pull/7" }),
+    t("beta", "ask", "Needs Input", { question: "นับลาป่วยไหม?" }),
+    t("beta", "typo", "Readdy"),
+    t("gamma", "next", "To Do"),
+  ];
+
+  test("บอร์ดละบรรทัด ไม่นับศูนย์ บอร์ดที่รอเราขึ้นก่อน", () => {
+    const lines = boardText(["alpha", "beta", "gamma"], tasks).split("\n");
+    expect(lines.slice(0, 4)).toEqual([
+      "<b>บอร์ด</b>",
+      "<b>beta</b>  รอเรา 2, status ผิด 1",
+      "<b>alpha</b>  กำลังทำ 1, เสร็จ 1",
+      "<b>gamma</b>  To Do 1",
+    ]);
+  });
+
+  test("งานที่รอเรา จัดกลุ่มตามบอร์ด คำถามขึ้นก่อน ลิงก์ไป PR", () => {
+    const text = boardText(["alpha", "beta", "gamma"], tasks);
+    expect(text).toContain(
+      '<b>รอเรา 2 งาน</b>\n\n<b>beta</b>\nถามมา  ask\n<i>นับลาป่วยไหม?</i>\nพร้อมตรวจ  <a href="https://github.com/x/y/pull/7">csv</a>',
+    );
+    expect(text).not.toContain("<pre>");
+  });
+
+  test("ปุ่มเรียงเหมือนข้อความ", () => {
+    const rows = boardButtons(["alpha", "beta", "gamma"], tasks, (k) => k.length.toString(36));
+    expect(rows.map((r) => r[0].text)).toEqual(["ถามมา: ask", "พร้อมตรวจ: csv"]);
+  });
+
+  test("ไม่มีงานรอเรา", () => {
+    expect(boardText(["alpha"], [t("alpha", "x", "Done")])).toBe("<b>บอร์ด</b>\n<b>alpha</b>  เสร็จ 1\n\nไม่มีงานรอเรา");
   });
 });
 

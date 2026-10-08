@@ -11,7 +11,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Conflict, listBoards, nowStamp, readTask, repoPath, scanTasks, updateNote, type Task } from "./boards";
 import { appendChangesRequested, readFields, setField } from "./frontmatter";
-import { card, changesPrompt, clip, cb, doneText, esc, HELP, parseCb, wakeText } from "./messages";
+import { boardButtons, boardText, card, changesPrompt, doneText, esc, HELP, parseCb, wakeText } from "./messages";
 import { diff, idFor, loadState, rememberReply, saveState, type ReplyTarget } from "./state";
 import { telegram, TelegramError } from "./telegram";
 import { herdrRunner, loopStateFromTranscript, findLoopPanes, pickLoopPane, readTail, wakeLoop, type WakeResult } from "./wake";
@@ -35,7 +35,6 @@ const BOARDS_DIR = expand(process.env.BOARDS_DIR ?? "~/boards");
 const STATE_FILE = expand(process.env.STATE_FILE ?? "~/.local/state/loop-board-bot/state.json");
 const POLL_MS = Math.max(1, Number(process.env.POLL_SECONDS ?? 10)) * 1000;
 const HERDR_BIN = process.env.HERDR_BIN ?? (existsSync(`${HOME}/.local/bin/herdr`) ? `${HOME}/.local/bin/herdr` : "herdr");
-const BOARD_BIN = process.env.BOARD_BIN ?? (existsSync(`${HOME}/.local/bin/board`) ? `${HOME}/.local/bin/board` : "board");
 const LOOP_WAKE = process.env.LOOP_WAKE !== "0";
 const WAKE_RETRY_MS = 30 * 60 * 1000;
 const FLOOD = 8;
@@ -274,18 +273,11 @@ async function run(token: string, owner: number): Promise<void> {
   }
 
   async function boardSummary(): Promise<void> {
-    const r = Bun.spawnSync([BOARD_BIN, "ls"], {
-      env: { ...process.env, NO_COLOR: "1", BOARDS_DIR },
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const out = r.exitCode === 0 ? r.stdout.toString() : `board CLI ไม่ทำงาน (${BOARD_BIN})\n${r.stderr.toString()}`;
-    const waiting = scanTasks(BOARDS_DIR).filter((t) => ["Ready to Test", "Testing", "Needs Input"].includes(t.status));
-    const rows = waiting.slice(0, 20).map((t) => [
-      { text: clip(`${t.status}: ${t.board}/${t.task}`, 60), callback_data: cb(idFor(state, t.key), "card", t.status) },
-    ]);
+    const boards = listBoards(BOARDS_DIR);
+    const tasks = scanTasks(BOARDS_DIR);
+    const rows = boardButtons(boards, tasks, (key) => idFor(state, key));
     save();
-    await bot.send(owner, `<pre>${esc(clip(out.replace(/\s+$/gm, ""), 3800))}</pre>`, rows.length ? { inline_keyboard: rows } : undefined);
+    await bot.send(owner, boardText(boards, tasks), rows.length ? { inline_keyboard: rows } : undefined);
   }
 
   async function onMessage(m: any): Promise<void> {

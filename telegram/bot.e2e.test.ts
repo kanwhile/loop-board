@@ -183,6 +183,10 @@ test("/board ส่งสรุปพร้อมปุ่มเปิดกา�
   await Bun.sleep(1500);
   const before = lastSentIndex();
   say("/board");
-  const s = await until(() => sent.slice(before).find((m) => m.method === "sendMessage" && m.params.text.startsWith("<pre>")));
-  expect(buttons(s).some((b: string[]) => b[0].includes("demo/ask"))).toBe(true);
+  const s = await until(() => sent.slice(before).find((m) => m.method === "sendMessage" && m.params.text.startsWith("<b>บอร์ด</b>")));
+  expect(s.params.text).toContain("<b>demo</b>  รอเรา 1");
+  expect(s.params.text).toContain("ถามมา  <a href=\"https://github.com/x/y/pull/7\">ask</a>");
+  expect(buttons(s).map((b: string[]) => b[0])).toEqual(["ถามมา: ask"]);
+  tap(buttons(s)[0][1], s.message_id);
+  await until(() => sent.find((m) => m.method === "sendMessage" && m.message_id > s.message_id && m.params.text.includes("Agent ถามมา")));
 });
