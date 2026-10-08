@@ -93,6 +93,92 @@ export function card(t: Task, id: string): Card {
   }
 }
 
+// สรุป /board สำหรับจอมือถือ: บอร์ดละบรรทัด แล้วงานที่รอเราจัดกลุ่มตามบอร์ด
+// นับแบบเดียวกับ cmd_list ใน bin/board แต่ไม่ทำเป็นตาราง เพราะคอลัมน์ล้นจอแคบ
+const GROUP: Record<string, "todo" | "active" | "waiting" | "done" | "skip"> = {
+  Backlog: "skip",
+  "To Do": "todo",
+  "In Progress": "active",
+  "Agent Finished": "active",
+  "Needs Changes": "active",
+  "Ready to Merge": "active",
+  "Needs Input": "waiting",
+  "Ready to Test": "waiting",
+  Testing: "waiting",
+  Done: "done",
+};
+const WAIT_LABEL: Record<string, string> = { "Ready to Test": "พร้อมตรวจ", Testing: "กำลังทดสอบ", "Needs Input": "ถามมา" };
+const WAIT_ORDER = ["Needs Input", "Ready to Test", "Testing"];
+
+export function isWaiting(t: Task): boolean {
+  return GROUP[t.status] === "waiting";
+}
+
+function count(tasks: Task[], board: string, group: string): number {
+  return tasks.filter((t) => t.board === board && GROUP[t.status] === group).length;
+}
+
+// บอร์ดที่มีงานรอเราขึ้นก่อน
+function boardOrder(boards: string[], tasks: Task[]): string[] {
+  return [...boards].sort((a, b) => count(tasks, b, "waiting") - count(tasks, a, "waiting") || a.localeCompare(b));
+}
+
+// งานที่รอเรา เรียงตามบอร์ด แล้วคำถามก่อน พร้อมตรวจ แล้วกำลังทดสอบ
+function waitingInOrder(boards: string[], tasks: Task[]): Task[] {
+  return boardOrder(boards, tasks).flatMap((b) =>
+    tasks
+      .filter((t) => t.board === b && isWaiting(t))
+      .sort((x, y) => WAIT_ORDER.indexOf(x.status) - WAIT_ORDER.indexOf(y.status) || x.task.localeCompare(y.task)),
+  );
+}
+
+export function boardText(boards: string[], tasks: Task[]): string {
+  const order = boardOrder(boards, tasks);
+  const lines = ["<b>บอร์ด</b>"];
+  for (const b of order) {
+    const broken = tasks.filter((t) => t.board === b && !(t.status in GROUP)).length;
+    const parts = (
+      [
+        [count(tasks, b, "waiting"), "รอเรา"],
+        [count(tasks, b, "active"), "กำลังทำ"],
+        [count(tasks, b, "todo"), "To Do"],
+        [count(tasks, b, "done"), "เสร็จ"],
+        [broken, "status ผิด"],
+      ] as [number, string][]
+    )
+      .filter(([n]) => n)
+      .map(([n, label]) => `${label} ${n}`);
+    lines.push(`<b>${esc(b)}</b>  ${parts.join(", ") || "ว่าง"}`);
+  }
+
+  const waiting = waitingInOrder(boards, tasks);
+  if (!waiting.length) {
+    lines.push("", "ไม่มีงานรอเรา");
+    return lines.join("\n");
+  }
+  lines.push("", `<b>รอเรา ${waiting.length} งาน</b>`);
+  let current = "";
+  for (const t of waiting) {
+    if (t.board !== current) {
+      current = t.board;
+      lines.push("", `<b>${esc(t.board)}</b>`);
+    }
+    const name = esc(clip(t.task, 48));
+    const age = ageOf(t.statusSince);
+    lines.push(`${WAIT_LABEL[t.status]}  ${t.pr ? `<a href="${esc(t.pr)}">${name}</a>` : name}${age ? `, ${age}` : ""}`);
+    if (t.status === "Needs Input" && t.question) lines.push(`<i>${esc(clip(t.question, 120))}</i>`);
+  }
+  lines.push("", "<i>กดปุ่มข้างล่างเพื่อเปิดการ์ดของงาน</i>");
+  return clip(lines.join("\n"), 4000);
+}
+
+// ปุ่มเปิดการ์ด เรียงเหมือนในข้อความ
+export function boardButtons(boards: string[], tasks: Task[], idOf: (key: string) => string): InlineButton[][] {
+  return waitingInOrder(boards, tasks)
+    .slice(0, 20)
+    .map((t) => [{ text: clip(`${WAIT_LABEL[t.status]}: ${t.task}`, 48), callback_data: cb(idOf(t.key), "card", t.status) }]);
+}
+
 export function doneText(t: Task): string {
   return `<b>merge แล้ว</b>  [${esc(t.board)}] <code>${esc(t.task)}</code>\n${prLink(t.pr)}`;
 }

@@ -14,7 +14,7 @@
 | กดเริ่มทดสอบแล้ว | การ์ดเปลี่ยนเป็น "กำลังทดสอบ" | **Merge ได้** (เป็น `Ready to Merge`), **ขอแก้**, **ยังไม่ทดสอบ** |
 | งานเข้า `Needs Input` | คำถามของ agent | reply ข้อความนั้นด้วยคำตอบ (เขียนลง `answer`) |
 | `Ready to Merge` กลายเป็น `Done` | "merge แล้ว" | |
-| พิมพ์ `/board` | ผลของคำสั่ง `board` | ปุ่มเปิดการ์ดของงานที่รอเรา |
+| พิมพ์ `/board` | สรุปบอร์ดละบรรทัด และงานที่รอเราแยกตามบอร์ด | ปุ่มเปิดการ์ดของงานที่รอเรา |
 
 **ขอแก้** บอทจะถามว่าต้องแก้อะไร พิมพ์ตอบโดย reply แล้วบอทเขียนบล็อก `Changes requested:` ลงโน้ต
 พร้อมเปลี่ยนเป็น `Needs Changes` ในการเขียนครั้งเดียว ตามที่ protocol กำหนดว่าต้องมาคู่กัน
@@ -42,7 +42,7 @@ loop ที่หยุดไปแล้วไม่เฝ้าบอร์ด
 
 ## ติดตั้ง
 
-ต้องมี `bun` และ `board` (อยู่ใน `bin/` ของ repo นี้) ส่วน herdr ใช้เฉพาะตอนปลุก loop
+ต้องมี `bun` ส่วน herdr ใช้เฉพาะตอนปลุก loop
 
 1. **สร้างบอท** คุยกับ [@BotFather](https://t.me/BotFather) สั่ง `/newbot` แล้วเก็บ token ไว้
 2. **ใส่ token** ใน `~/.config/loop-board-bot/env`
@@ -88,7 +88,7 @@ loop ที่หยุดไปแล้วไม่เฝ้าบอร์ด
 | `BOARDS_DIR` | `~/boards` | |
 | `POLL_SECONDS` | `10` | เช็กบอร์ดทุกกี่วินาที |
 | `LOOP_WAKE` | `1` | `0` = ไม่ปลุก loop |
-| `HERDR_BIN`, `BOARD_BIN` | `~/.local/bin/...` | |
+| `HERDR_BIN` | `~/.local/bin/herdr` | |
 | `STATE_FILE` | `~/.local/state/loop-board-bot/state.json` | offset ของ Telegram, status ล่าสุดที่เห็น, การ์ดที่รอ reply |
 
 ## ความปลอดภัย
